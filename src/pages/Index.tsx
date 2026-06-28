@@ -75,6 +75,17 @@ const FAMILY_SUBTYPES: Record<string, string[]> = {
   feu: ["clignotant", "antibrouillard"],
 };
 
+const PRIMARY_FAMILY_SUBTYPE: Record<string, string> = {
+  amortisseur: "Amortisseur",
+  aile: "Aile",
+  capot: "Capot",
+  porte: "Porte",
+  phare: "Optique",
+  feu: "Feu",
+  cardan: "Cardan",
+  triangle: "Triangle",
+};
+
 const COURTESY_TERMS = ["merci", "merci beaucoup", "merci sahbi", "sahbi", "shukran", "barakallah", "yaatik essaha", "bravo", "sa7a", "thank you", "thx"];
 
 const QUALIFIER_TOKENS = new Set(["av", "avant", "ar", "arriere", "g", "gauche", "d", "droite", "droit", "sup", "superieur", "inf", "inferieur", "int", "interieur", "ext", "exterieur"]);
@@ -84,10 +95,10 @@ const SUBTYPE_PATTERNS: Array<{ label: string; patterns: RegExp[] }> = [
   { label: "Marmite", patterns: [/MARMITE/, /SILENCIEUX/] },
   { label: "Joint", patterns: [/\bJOINT\b/] },
   { label: "Soupape", patterns: [/SOUPAPE/] },
+  { label: "Roulement support", patterns: [/ROULEMENT SUPPORT/] },
   { label: "Support", patterns: [/SUPPORT/] },
   { label: "Catalyseur", patterns: [/CATALYSEUR/] },
   { label: "Ligne", patterns: [/\bLIGNE\b/] },
-  { label: "Roulement support", patterns: [/ROULEMENT SUPPORT/] },
   { label: "Roulement", patterns: [/\bROULEMENT\b/] },
   { label: "Toc amortisseur", patterns: [/\bTOC\b/, /\bTOCS\b/] },
   { label: "Optique", patterns: [/OPTIQUE/, /PROJECTEUR/] },
@@ -199,7 +210,17 @@ const buildChoiceGroups = (candidates: RankedPart[], query: string): ChatMessage
   if (inStockCandidates.length <= 1) return [];
 
   const groups: ChatMessageChoiceGroup[] = [];
-  const subtypeOptions = Array.from(new Set(inStockCandidates.map((candidate) => detectSubtypeLabel(candidate.designation)).filter(Boolean)));
+  const family = extractFamilyFromText(query);
+  const primarySubtype = family ? PRIMARY_FAMILY_SUBTYPE[family] : undefined;
+  const subtypeOptions = Array.from(new Set(inStockCandidates.map((candidate) => detectSubtypeLabel(candidate.designation)).filter(Boolean))).sort((left, right) => {
+    const leftPrimary = primarySubtype && left === primarySubtype ? 1 : 0;
+    const rightPrimary = primarySubtype && right === primarySubtype ? 1 : 0;
+    if (leftPrimary !== rightPrimary) {
+      return rightPrimary - leftPrimary;
+    }
+
+    return left.localeCompare(right, "fr");
+  });
   const remainingSubtypeOptions = subtypeOptions.filter((option) => !queryMentionsChoice(query, option));
   if (remainingSubtypeOptions.length > 1) {
     return [{
@@ -230,6 +251,24 @@ const buildChoiceGroups = (candidates: RankedPart[], query: string): ChatMessage
   });
 
   return groups;
+};
+
+const sortCandidatesForDisplay = (candidates: RankedPart[], label: string) => {
+  const family = extractFamilyFromText(label);
+  const primarySubtype = family ? PRIMARY_FAMILY_SUBTYPE[family] : undefined;
+
+  return [...candidates].sort((left, right) => {
+    const leftSubtype = detectSubtypeLabel(left.designation);
+    const rightSubtype = detectSubtypeLabel(right.designation);
+
+    const leftPrimaryBoost = primarySubtype && leftSubtype === primarySubtype ? 1 : 0;
+    const rightPrimaryBoost = primarySubtype && rightSubtype === primarySubtype ? 1 : 0;
+    if (leftPrimaryBoost !== rightPrimaryBoost) {
+      return rightPrimaryBoost - leftPrimaryBoost;
+    }
+
+    return right.searchScore - left.searchScore || right.stock - left.stock;
+  });
 };
 
 const filterCandidatesByChoices = (candidates: RankedPart[], selectedChoices: Record<string, string>) => {
@@ -542,7 +581,8 @@ const Index = () => {
         continue;
       }
 
-      const choiceGroups = buildChoiceGroups(inStockCandidates, task.requestedLabel);
+      const focusedCandidates = sortCandidatesForDisplay(inStockCandidates, displayLabel);
+      const choiceGroups = buildChoiceGroups(focusedCandidates, task.requestedLabel);
       if (choiceGroups.length > 0) {
         const choiceMessageId = makeId();
         const choiceMessage = formatVariantQuestion(displayLabel, choiceGroups);
@@ -556,7 +596,7 @@ const Index = () => {
         setActiveVariantSelection({
           messageId: choiceMessageId,
           task,
-          candidates: inStockCandidates,
+          candidates: focusedCandidates,
           choiceGroups,
           selectedChoices: {},
           remainingTasks: tasks.slice(taskIndex + 1),
@@ -564,7 +604,7 @@ const Index = () => {
         return;
       }
 
-      candidates = filterCandidatesByChoices(inStockCandidates, {});
+      candidates = sortCandidatesForDisplay(filterCandidatesByChoices(focusedCandidates, {}), displayLabel);
       const response = formatAvailablePartsResponse(displayLabel, candidates);
       appendMessage({
         id: makeId(),
@@ -627,8 +667,9 @@ const Index = () => {
         const filteredCandidates = filterCandidatesByChoices(activeVariantSelection.candidates, explicitChoices);
 
         if (filteredCandidates.length > 0) {
+          const orderedFilteredCandidates = sortCandidatesForDisplay(filteredCandidates, activeVariantSelection.task.requestedLabel);
           const remainingChoiceGroups = buildChoiceGroups(
-            filteredCandidates,
+            orderedFilteredCandidates,
             `${activeVariantSelection.task.searchPrompt || activeVariantSelection.task.requestedLabel} ${outgoingMessage}`.trim(),
           );
 
@@ -644,7 +685,7 @@ const Index = () => {
             setActiveVariantSelection({
               messageId: choiceMessageId,
               task: activeVariantSelection.task,
-              candidates: filteredCandidates,
+              candidates: orderedFilteredCandidates,
               choiceGroups: remainingChoiceGroups,
               selectedChoices: explicitChoices,
               remainingTasks: activeVariantSelection.remainingTasks,
@@ -652,7 +693,7 @@ const Index = () => {
             return;
           }
 
-          const response = formatAvailablePartsResponse(activeVariantSelection.task.requestedLabel, filteredCandidates);
+          const response = formatAvailablePartsResponse(activeVariantSelection.task.requestedLabel, orderedFilteredCandidates);
           appendMessage({
             id: makeId(),
             role: "assistant",
