@@ -221,7 +221,14 @@ const buildChoiceGroups = (candidates: RankedPart[], query: string): ChatMessage
 
     return left.localeCompare(right, "fr");
   });
-  const remainingSubtypeOptions = subtypeOptions.filter((option) => !queryMentionsChoice(query, option));
+  const normalizedQuery = normalize(query);
+  const remainingSubtypeOptions = subtypeOptions.filter((option) => {
+    if (primarySubtype && option === primarySubtype) {
+      return true;
+    }
+
+    return !normalizedQuery.includes(normalize(option));
+  });
   if (remainingSubtypeOptions.length > 1) {
     return [{
       key: "piece",
