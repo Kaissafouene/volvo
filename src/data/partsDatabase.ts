@@ -57,7 +57,7 @@ const FAMILY_ALIASES: Record<string, string[]> = {
   filtre: ["filtre", "filter", "filtr"],
   frein: ["frein", "freinage", "brake", "plaquette", "plaquettes", "disque", "disques", "etrier", "tambour"],
   cardan: ["cardan", "transmission"],
-  triangle: ["triangle", "bras de suspension", "bras suspension", "bras"],
+  triangle: ["triangle", "bras de suspension", "bras suspension"],
   roulement: ["roulement", "bearing", "rulman", "roulman"],
   batterie: ["batterie", "battery"],
   radiateur: ["radiateur", "refroidissement"],
@@ -319,6 +319,12 @@ export function buildPartSearchCandidates(query: string, model?: "volvo", limit 
       }
       score += 260 * (FAMILY_WEIGHTS[intent.family] || 1);
       signals.add(`Famille: ${intent.family}`);
+
+      const normalizedPrimaryHead = normalize(intent.family).split(" ")[0];
+      if (entry.articleHead === normalizedPrimaryHead) {
+        score += 120;
+        signals.add("Article principal");
+      }
     }
 
     if (intent.subtype) {
