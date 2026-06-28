@@ -92,6 +92,7 @@ const QUALIFIER_TOKENS = new Set(["av", "avant", "ar", "arriere", "g", "gauche",
 const STOP_SUBTYPE_TOKENS = new Set(["de", "du", "des", "d", "la", "le", "les"]);
 
 const SUBTYPE_PATTERNS: Array<{ label: string; patterns: RegExp[] }> = [
+  { label: "Porte reservoir", patterns: [/^PORTE RESERVOIR/] },
   { label: "Agrafe", patterns: [/^AGRAFE/, /^AGRAFES/, /^AGRAFFE/] },
   { label: "Charniere", patterns: [/^CHARNIERE/, /^CHARNIÈRE/] },
   { label: "Cable", patterns: [/^CABLE/] },
@@ -112,6 +113,7 @@ const SUBTYPE_PATTERNS: Array<{ label: string; patterns: RegExp[] }> = [
   { label: "Catalyseur", patterns: [/CATALYSEUR/] },
   { label: "Ligne", patterns: [/\bLIGNE\b/] },
   { label: "Roulement", patterns: [/\bROULEMENT\b/] },
+  { label: "Amortisseur malle", patterns: [/AMORTISSEUR MALLE/] },
   { label: "Toc amortisseur", patterns: [/\bTOC\b/, /\bTOCS\b/] },
   { label: "Optique", patterns: [/OPTIQUE/, /PROJECTEUR/] },
   { label: "Clignotant", patterns: [/CLIGNOTANT/, /CLIGNO/] },
