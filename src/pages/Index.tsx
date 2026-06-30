@@ -9,14 +9,16 @@ import { ChatMessage, type ChatMessageChoiceGroup } from "@/components/ChatMessa
 import { VehicleMessage } from "@/components/VehicleMessage";
 import { ImageUpload } from "@/components/ImageUpload";
 import { Header } from "@/components/Header";
+import { extractVehicleInfoFromImage, type VehicleInfo } from "@/services/geminiService";
 import {
-  analyzePartSearchIntent,
-  analyzePartsBatchRequest,
-  extractVehicleInfoFromImage,
-  type VehicleInfo,
-} from "@/services/geminiService";
-import { buildPartSearchCandidates, type RankedPart } from "@/data/partsDatabase";
-import { volvoParts } from "@/data/volvoPartsDatabase";
+  buildChoiceGroupsFromParts,
+  detectAmbiguousAxes,
+  filterPartsByChoices,
+  getCatalogPartsByReferences,
+  searchPartsConversationWithOpenAI,
+  type ClarificationAxis,
+} from "@/services/openaiPartsService";
+import type { Part } from "@/data/volvoPartsDatabase";
 
 interface Message {
   id: string;
@@ -26,109 +28,20 @@ interface Message {
   choiceGroups?: ChatMessageChoiceGroup[];
 }
 
-interface SearchTask {
-  id: string;
-  requestedLabel: string;
-  searchPrompt?: string;
-}
-
 interface ActiveVariantSelection {
   messageId: string;
-  task: SearchTask;
-  candidates: RankedPart[];
+  label: string;
+  candidateReferences: string[];
   choiceGroups: ChatMessageChoiceGroup[];
   selectedChoices: Record<string, string>;
-  remainingTasks: SearchTask[];
 }
 
-interface SearchMemory {
-  family?: string;
-  normalizedQuery?: string;
-}
+const CONTACT_BLOCK = `Cette piece n'est pas disponible en stock pour le moment.
+Pour suivre l'arrivage de cette piece, merci de contacter directement le siege sur place :
+86, rue 8603 Zone industrielle Charguia 1, Tunis, Tunisia, 2035
+ou par telephone : 36 028 020`;
 
-const CONTACT_BLOCK = `Cette piece n'est pas disponible en stock pour le moment.\nPour suivre l'arrivage de cette piece, merci de contacter directement le siege sur place :\n86, rue 8603 Zone industrielle Charguia 1, Tunis, Tunisia, 2035\nou par telephone : 36 028 020`;
-
-const KNOWN_FAMILIES = [
-  "echappement",
-  "amortisseur",
-  "aile",
-  "porte",
-  "phare",
-  "feu",
-  "filtre",
-  "frein",
-  "pare choc",
-  "capot",
-  "retroviseur",
-  "vitre",
-  "cardan",
-  "triangle",
-  "roulement",
-  "batterie",
-];
-
-const FAMILY_SUBTYPES: Record<string, string[]> = {
-  echappement: ["marmite", "joint", "soupape", "support", "catalyseur", "ligne", "silencieux", "pot"],
-  amortisseur: ["support", "roulement", "toc", "ressort"],
-  aile: ["extension", "support", "garniture"],
-  phare: ["optique", "projecteur"],
-  feu: ["clignotant", "antibrouillard"],
-};
-
-const PRIMARY_FAMILY_SUBTYPE: Record<string, string> = {
-  amortisseur: "Amortisseur",
-  aile: "Aile",
-  capot: "Capot",
-  porte: "Porte",
-  phare: "Optique",
-  feu: "Feu",
-  cardan: "Cardan",
-  triangle: "Triangle",
-};
-
-const COURTESY_TERMS = ["merci", "merci beaucoup", "merci sahbi", "sahbi", "shukran", "barakallah", "yaatik essaha", "bravo", "sa7a", "thank you", "thx"];
-
-const QUALIFIER_TOKENS = new Set(["av", "avant", "ar", "arriere", "g", "gauche", "d", "droite", "droit", "sup", "superieur", "inf", "inferieur", "int", "interieur", "ext", "exterieur"]);
-const STOP_SUBTYPE_TOKENS = new Set(["de", "du", "des", "d", "la", "le", "les"]);
-
-const SUBTYPE_PATTERNS: Array<{ label: string; patterns: RegExp[] }> = [
-  { label: "Porte reservoir", patterns: [/^PORTE RESERVOIR/] },
-  { label: "Agrafe", patterns: [/^AGRAFE/, /^AGRAFES/, /^AGRAFFE/] },
-  { label: "Charniere", patterns: [/^CHARNIERE/, /^CHARNIÈRE/] },
-  { label: "Cable", patterns: [/^CABLE/] },
-  { label: "Serrure", patterns: [/^SERRURE/] },
-  { label: "Poignee", patterns: [/^POIGNEE/] },
-  { label: "Joint", patterns: [/^JOINT\b/, /\bJOINT\b/] },
-  { label: "Adhesif", patterns: [/^ADHESIF/] },
-  { label: "Capteur", patterns: [/^CAPTEUR/] },
-  { label: "Douille", patterns: [/^DOUILLE/] },
-  { label: "Cache", patterns: [/^CACHE/] },
-  { label: "Tiran", patterns: [/^TIRAN/] },
-  { label: "Loquet", patterns: [/^LOQUET/] },
-  { label: "Calle", patterns: [/^CALLE/] },
-  { label: "Marmite", patterns: [/MARMITE/, /SILENCIEUX/] },
-  { label: "Soupape", patterns: [/SOUPAPE/] },
-  { label: "Roulement support", patterns: [/ROULEMENT SUPPORT/] },
-  { label: "Support", patterns: [/SUPPORT/] },
-  { label: "Catalyseur", patterns: [/CATALYSEUR/] },
-  { label: "Ligne", patterns: [/\bLIGNE\b/] },
-  { label: "Roulement", patterns: [/\bROULEMENT\b/] },
-  { label: "Amortisseur malle", patterns: [/AMORTISSEUR MALLE/] },
-  { label: "Toc amortisseur", patterns: [/\bTOC\b/, /\bTOCS\b/] },
-  { label: "Optique", patterns: [/OPTIQUE/, /PROJECTEUR/] },
-  { label: "Clignotant", patterns: [/CLIGNOTANT/, /CLIGNO/] },
-  { label: "Plaquette", patterns: [/PLAQUETTE/] },
-  { label: "Disque", patterns: [/DISQUE/] },
-  { label: "Etrier", patterns: [/ETRIER/] },
-  { label: "Cardan", patterns: [/CARDAN/] },
-  { label: "Triangle", patterns: [/^TRIANGLE/] },
-  { label: "Capot", patterns: [/^CAPOT\b/] },
-  { label: "Porte", patterns: [/^PORTE\b/] },
-  { label: "Aile", patterns: [/^AILE\b/] },
-  { label: "Amortisseur", patterns: [/^AMORTISSEUR\b/] },
-  { label: "Phare", patterns: [/^PHARE\b/, /^OPTIQUE\b/] },
-  { label: "Feu", patterns: [/^FEU\b/] },
-];
+const COURTESY_PATTERN = /^(merci|merci beaucoup|thank you|thx|shukran|barakallah|yaatik essaha|bravo|sa7a|bonjour|bonsoir|salut|hello|cc)$/i;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -141,205 +54,58 @@ const normalize = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
-const mergeCandidatePools = (queries: string[]) => {
-  const merged = new Map<string, RankedPart>();
+const formatPriceDT = (value: number) =>
+  `${value.toLocaleString("fr-TN", {
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3,
+  })} DT`;
 
-  queries
-    .filter(Boolean)
-    .forEach((query) => {
-      buildPartSearchCandidates(query, "volvo", 24).forEach((candidate) => {
-        const existing = merged.get(candidate.reference);
-        if (!existing || candidate.searchScore > existing.searchScore) {
-          merged.set(candidate.reference, candidate);
-          return;
-        }
+const sanitizeAssistantNarrative = (text: string) =>
+  text
+    .replace(/â‚¬/g, "DT")
+    .replace(/\bEUR\b/gi, "DT")
+    .replace(/\beuro?s?\b/gi, "DT")
+    .replace(/\bavec\s+\d+\s+unit[eé]s?\b/gi, "")
+    .replace(/\b\d+\s+unit[eé]s?\b/gi, "")
+    .replace(/\b\d+\s+en stock\b/gi, "")
+    .replace(/\s+,/g, ",")
+    .replace(/\s+\./g, ".")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 
-        merged.set(candidate.reference, {
-          ...existing,
-          searchScore: Math.max(existing.searchScore, candidate.searchScore),
-          searchSignals: Array.from(new Set([...existing.searchSignals, ...candidate.searchSignals])),
-        });
-      });
-    });
-
-  return Array.from(merged.values())
-    .sort((a, b) => b.searchScore - a.searchScore || b.stock - a.stock)
-    .slice(0, 30);
-};
-
-const queryMentionsChoice = (query: string, option: string) => {
-  const normalizedQuery = normalize(query);
-  const aliases: Record<string, string[]> = {
-    Avant: ["avant", "av"],
-    Arriere: ["arriere", "ar"],
-    Gauche: ["gauche", "conducteur"],
-    Droite: ["droite", "passager"],
-    Superieur: ["superieur"],
-    Inferieur: ["inferieur"],
-  };
-
-  return (aliases[option] || [option.toLowerCase()]).some((alias) => normalizedQuery.includes(alias));
-};
-
-const detectSubtypeLabel = (designation: string) => {
-  const upperDesignation = designation.toUpperCase();
-  const explicitSubtype = SUBTYPE_PATTERNS.find(({ patterns }) => patterns.some((pattern) => pattern.test(upperDesignation)));
-  if (explicitSubtype) return explicitSubtype.label;
-
-  const cleanedTokens = normalize(designation)
-    .split(" ")
-    .filter((token) => token && !QUALIFIER_TOKENS.has(token) && !STOP_SUBTYPE_TOKENS.has(token));
-
-  if (cleanedTokens.length === 0) return "";
-  return cleanedTokens.slice(0, Math.min(2, cleanedTokens.length)).map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join(" ");
-};
-
-const candidateMatchesChoice = (candidate: RankedPart, groupKey: string, option: string) => {
-  const designation = candidate.designation.toUpperCase();
-
-  if (groupKey === "piece") {
-    return detectSubtypeLabel(candidate.designation) === option;
-  }
-
-  switch (option) {
-    case "Avant":
-      return /\bAV\b/.test(designation) || designation.includes("AVANT");
-    case "Arriere":
-      return /\bAR\b/.test(designation) || designation.includes("ARRIERE") || designation.includes("AR ");
-    case "Gauche":
-      return /\bG\b/.test(designation) || designation.includes("GAUCHE");
-    case "Droite":
-      return /\bD\b/.test(designation) || designation.includes("DROITE") || designation.includes("DROIT");
-    case "Superieur":
-      return designation.includes("SUPERIEUR") || /\bSUP\b/.test(designation);
-    case "Inferieur":
-      return designation.includes("INFERIEUR") || /\bINF\b/.test(designation);
-    default:
-      return false;
-  }
-};
-
-const buildChoiceGroups = (candidates: RankedPart[], query: string): ChatMessageChoiceGroup[] => {
-  const inStockCandidates = candidates.filter((candidate) => candidate.stock > 0);
-  if (inStockCandidates.length <= 1) return [];
-
-  const groups: ChatMessageChoiceGroup[] = [];
-  const family = extractFamilyFromText(query);
-  const primarySubtype = family ? PRIMARY_FAMILY_SUBTYPE[family] : undefined;
-  const subtypeOptions = Array.from(new Set(inStockCandidates.map((candidate) => detectSubtypeLabel(candidate.designation)).filter(Boolean))).sort((left, right) => {
-    const leftPrimary = primarySubtype && left === primarySubtype ? 1 : 0;
-    const rightPrimary = primarySubtype && right === primarySubtype ? 1 : 0;
-    if (leftPrimary !== rightPrimary) {
-      return rightPrimary - leftPrimary;
-    }
-
-    return left.localeCompare(right, "fr");
-  });
-  const normalizedQuery = normalize(query);
-  const remainingSubtypeOptions = subtypeOptions.filter((option) => {
-    if (primarySubtype && option === primarySubtype) {
-      return true;
-    }
-
-    return !normalizedQuery.includes(normalize(option));
-  });
-  if (remainingSubtypeOptions.length > 1) {
-    return [{
-      key: "piece",
-      label: "Piece",
-      options: remainingSubtypeOptions,
-    }];
-  }
-
-  const possibleGroups = [
-    { key: "position", label: "Position", options: ["Avant", "Arriere"] },
-    { key: "cote", label: "Cote", options: ["Gauche", "Droite"] },
-    { key: "niveau", label: "Niveau", options: ["Superieur", "Inferieur"] },
-  ];
-
-  possibleGroups.forEach((group) => {
-    const availableOptions = group.options.filter((option) => inStockCandidates.some((candidate) => candidateMatchesChoice(candidate, group.key, option)));
-    if (availableOptions.length > 1) {
-      const remainingOptions = availableOptions.filter((option) => !queryMentionsChoice(query, option));
-      if (remainingOptions.length > 0) {
-        groups.push({
-          key: group.key,
-          label: group.label,
-          options: remainingOptions,
-        });
-      }
-    }
-  });
-
-  return groups;
-};
-
-const sortCandidatesForDisplay = (candidates: RankedPart[], label: string) => {
-  const family = extractFamilyFromText(label);
-  const primarySubtype = family ? PRIMARY_FAMILY_SUBTYPE[family] : undefined;
-
-  return [...candidates].sort((left, right) => {
-    const leftSubtype = detectSubtypeLabel(left.designation);
-    const rightSubtype = detectSubtypeLabel(right.designation);
-
-    const leftPrimaryBoost = primarySubtype && leftSubtype === primarySubtype ? 1 : 0;
-    const rightPrimaryBoost = primarySubtype && rightSubtype === primarySubtype ? 1 : 0;
-    if (leftPrimaryBoost !== rightPrimaryBoost) {
-      return rightPrimaryBoost - leftPrimaryBoost;
-    }
-
-    return right.searchScore - left.searchScore || right.stock - left.stock;
-  });
-};
-
-const filterCandidatesByChoices = (candidates: RankedPart[], selectedChoices: Record<string, string>) => {
-  const selectedEntries = Object.entries(selectedChoices).filter(([, option]) => Boolean(option));
-  if (selectedEntries.length === 0) return candidates;
-
-  return candidates.filter((candidate) =>
-    selectedEntries.every(([groupKey, option]) => candidateMatchesChoice(candidate, groupKey, option)),
-  );
-};
-
-const formatAvailablePartsResponse = (label: string, candidates: RankedPart[]) => {
-  const visibleCandidates = candidates.filter((candidate) => candidate.stock > 0).slice(0, 3);
-  if (visibleCandidates.length === 0) {
+const formatAvailablePartsResponse = (label: string, references: string[], introOverride?: string) => {
+  const visibleParts = getCatalogPartsByReferences(references).filter((part) => part.stock > 0).slice(0, 3);
+  if (visibleParts.length === 0) {
     return CONTACT_BLOCK;
   }
 
   const intro =
-    visibleCandidates.length === 1
-      ? `Oui, nous avons trouve une correspondance disponible pour ${label}.`
-      : `Oui, nous avons trouve ${visibleCandidates.length} correspondances disponibles pour ${label}.`;
+    introOverride?.trim()
+      ? sanitizeAssistantNarrative(introOverride.trim())
+      : visibleParts.length === 1
+        ? `Oui, nous avons trouve une correspondance disponible pour ${label}.`
+        : `Oui, nous avons trouve ${visibleParts.length} correspondances disponibles pour ${label}.`;
 
-  const blocks = visibleCandidates.map((candidate) => {
-    return [
-      `Reference : ${candidate.reference}`,
-      `Designation : ${candidate.designation}`,
-      `Prix HT : ${candidate.priceHT}`,
-      "Stock : Disponible",
-    ].join("\n");
-  });
+  const blocks = visibleParts.map((part) =>
+    [
+      `Reference : ${part.reference}`,
+      `Designation : ${part.designation}`,
+      `Prix HT : ${formatPriceDT(part.priceHT)}`,
+    ].join("\n"),
+  );
 
   return [intro, ...blocks].join("\n\n");
 };
 
-const formatVariantQuestion = (label: string, choiceGroups: ChatMessageChoiceGroup[]) => {
-  const availableDimensions = choiceGroups.map((group) => group.label.toLowerCase()).join(", ");
-  return `Oui, nous avons des resultats disponibles pour ${label}.\nPrecisez ${availableDimensions} pour afficher la piece exacte.`;
-};
+const AXIS_PRIORITY: ClarificationAxis[] = ["position", "cote", "niveau", "piece"];
 
-const formatQueueIntro = () => {
-  return "Nous allons rechercher les pieces demandees dans l'ordre de votre demande.";
-};
-
-const extractChoicesFromText = (value: string) => {
+const extractChoicesFromText = (value: string, availableChoiceGroups: ChatMessageChoiceGroup[] = []) => {
   const normalizedValue = normalize(value);
   const extracted: Record<string, string> = {};
 
   if (/(^|\s)(avant|av)(\s|$)/.test(normalizedValue)) {
     extracted.position = "Avant";
-  } else if (/(^|\s)(arriere|ar)(\s|$)/.test(normalizedValue)) {
+  } else if (/(^|\s)(arriere|ar|arriere)(\s|$)/.test(normalizedValue)) {
     extracted.position = "Arriere";
   }
 
@@ -355,93 +121,54 @@ const extractChoicesFromText = (value: string) => {
     extracted.niveau = "Inferieur";
   }
 
+  availableChoiceGroups
+    .filter((group) => group.key === "piece")
+    .forEach((group) => {
+      const matchedOption = group.options.find((option) => normalizedValue.includes(normalize(option)));
+      if (matchedOption) {
+        extracted.piece = matchedOption;
+      }
+    });
+
   return extracted;
 };
 
-const extractFamilyFromText = (value: string) => {
-  const normalizedValue = normalize(value);
-  return KNOWN_FAMILIES.find((family) => normalizedValue.includes(family));
-};
+const buildSequentialChoiceGroups = (parts: Part[], selectedChoices: Record<string, string> = {}) => {
+  const filteredParts = filterPartsByChoices(parts, selectedChoices);
+  const ambiguousAxes = detectAmbiguousAxes(filteredParts).filter((axis) => !(axis in selectedChoices));
+  const nextAxis = AXIS_PRIORITY.find((axis) => ambiguousAxes.includes(axis));
 
-const hasAutomotiveIntent = (value: string) => {
-  const normalizedValue = normalize(value);
-  if (!normalizedValue) return false;
-
-  return (
-    KNOWN_FAMILIES.some((family) => normalizedValue.includes(family)) ||
-    Object.values(FAMILY_SUBTYPES).some((subtypes) => subtypes.some((subtype) => normalizedValue.includes(subtype))) ||
-    /\b(fnar|fanar|avant|arriere|gauche|droite|superieur|inferieur|reference|prix|stock)\b/.test(normalizedValue)
-  );
-};
-
-const isSmallTalkMessage = (value: string) => {
-  const normalizedValue = normalize(value);
-  if (!normalizedValue) return false;
-
-  const containsCourtesy = COURTESY_TERMS.some((term) => normalizedValue.includes(normalize(term)));
-  return containsCourtesy && !hasAutomotiveIntent(normalizedValue) && normalizedValue.split(" ").length <= 5;
-};
-
-const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const sanitizeDisplayLabel = (value: string, vehicle?: VehicleInfo) => {
-  let cleaned = value;
-
-  if (vehicle?.modele) {
-    cleaned = cleaned.replace(new RegExp(`\\b${escapeRegex(vehicle.modele)}\\b`, "gi"), "");
-  }
-
-  if (vehicle?.annee) {
-    cleaned = cleaned.replace(new RegExp(`\\b${escapeRegex(vehicle.annee)}\\b`, "gi"), "");
-  }
-
-  cleaned = cleaned
-    .replace(/\bvolvo\b/gi, "")
-    .replace(/\b(non|oui|ok|je veux|je parle|je cherche|nheb|n7eb|choufli|behi|tawa|nlawej|lawwej|aussi)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return cleaned || value;
-};
-
-const enrichTaskWithMemory = (label: string, memory: SearchMemory | null): SearchTask => {
-  const normalizedLabel = normalize(label);
-  const explicitFamily = extractFamilyFromText(label);
-
-  if (isSmallTalkMessage(label) || !hasAutomotiveIntent(label)) {
+  if (!nextAxis) {
     return {
-      id: makeId(),
-      requestedLabel: label,
-      searchPrompt: label,
-    };
-  }
-
-  if (!memory?.family || explicitFamily) {
-    return {
-      id: makeId(),
-      requestedLabel: label,
-      searchPrompt: label,
-    };
-  }
-
-  const candidateSubtypes = FAMILY_SUBTYPES[memory.family] || [];
-  const mentionsSubtype = candidateSubtypes.some((subtype) => normalizedLabel.includes(subtype));
-  const looksLikeCorrection = /^(non|nn|je veux|je parle|plutot|plutôt|oui|juste|plutot une|plutot un)/i.test(label.trim());
-  const isShortFollowUp = normalizedLabel.split(" ").filter(Boolean).length <= 6;
-
-  if (!mentionsSubtype && !looksLikeCorrection && !isShortFollowUp) {
-    return {
-      id: makeId(),
-      requestedLabel: label,
-      searchPrompt: label,
+      choiceGroups: [] as ChatMessageChoiceGroup[],
+      filteredParts,
     };
   }
 
   return {
-    id: makeId(),
-    requestedLabel: label,
-    searchPrompt: `${label} ${memory.family}`.trim(),
+    choiceGroups: buildChoiceGroupsFromParts(filteredParts, [nextAxis]),
+    filteredParts,
   };
+};
+
+const buildClarificationMessage = (label: string, choiceGroups: ChatMessageChoiceGroup[]) => {
+  const firstGroup = choiceGroups[0];
+  if (!firstGroup) {
+    return `Pour ${label}, merci de preciser la variante souhaitee.`;
+  }
+
+  switch (firstGroup.key) {
+    case "position":
+      return `Pour ${label}, pourriez-vous me preciser si vous cherchez l'avant ou l'arriere ?`;
+    case "cote":
+      return `Pour ${label}, pourriez-vous me preciser si vous cherchez le cote droit ou gauche ?`;
+    case "niveau":
+      return `Pour ${label}, pourriez-vous me preciser s'il s'agit de la version superieure ou inferieure ?`;
+    case "piece":
+      return `Pour ${label}, pourriez-vous me preciser la piece exacte souhaitee ?`;
+    default:
+      return `Pour ${label}, merci de preciser la variante souhaitee.`;
+  }
 };
 
 const Index = () => {
@@ -452,7 +179,6 @@ const Index = () => {
   const [vehicles, setVehicles] = useState<VehicleInfo[]>([]);
   const [showUpload, setShowUpload] = useState(true);
   const [activeVariantSelection, setActiveVariantSelection] = useState<ActiveVariantSelection | null>(null);
-  const [searchMemory, setSearchMemory] = useState<SearchMemory | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -466,6 +192,7 @@ const Index = () => {
 
   const handleImageUpload = async (imageData: string) => {
     setIsProcessingImage(true);
+
     try {
       const info = await extractVehicleInfoFromImage(imageData);
       const infoWithId = { ...info, id: Date.now() };
@@ -498,14 +225,15 @@ const Index = () => {
         title: "Carte grise analysee",
         description: `${info.marque || "VOLVO"} ${info.modele || ""}`.trim(),
       });
-    } catch (error: any) {
-      const errorMessage = error?.message || "";
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "";
+      const errorDetails = error as Partial<{ detectedMarque: string; detectedModele: string }>;
       let title = "Carte grise refusee";
       let description = "Impossible d'analyser l'image. Reessayez avec une photo plus nette.";
 
       if (errorMessage === "INVALID_MODEL") {
-        const detectedMarque = error.detectedMarque || "Non detecte";
-        const detectedModele = error.detectedModele || "Non detecte";
+        const detectedMarque = errorDetails.detectedMarque || "Non detecte";
+        const detectedModele = errorDetails.detectedModele || "Non detecte";
         description = `Seules les cartes grises Volvo sont acceptees.\n\nDetecte: ${detectedMarque} ${detectedModele}`;
       } else if (errorMessage === "MISSING_GEMINI_API_KEY") {
         title = "Configuration manquante";
@@ -534,6 +262,7 @@ const Index = () => {
 
   const handleUpdateVehicle = (id?: number, updates?: Partial<VehicleInfo>) => {
     if (!id) return;
+
     setVehicles((prev) => prev.map((vehicle) => (vehicle.id === id ? { ...vehicle, ...updates } : vehicle)));
     setMessages((prev) =>
       prev.map((message) => {
@@ -548,107 +277,17 @@ const Index = () => {
     );
   };
 
-  const runSearchFlow = async (
-    tasks: SearchTask[],
-    historySnapshot: Array<{ role: string; content: string }>,
-    activeVehicle: VehicleInfo,
-  ) => {
-    let rollingHistory = [...historySnapshot];
-
-    for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
-      const task = tasks[taskIndex];
-      const searchSource = task.searchPrompt || task.requestedLabel;
-      const intent = await analyzePartSearchIntent(searchSource, rollingHistory, activeVehicle);
-      const displayLabel = sanitizeDisplayLabel(intent.normalizedQuery || task.requestedLabel, activeVehicle);
-      const searchQueries = [intent.normalizedQuery, searchSource, task.requestedLabel, ...intent.alternateQueries, intent.referenceHint || ""];
-      let candidates = mergeCandidatePools(searchQueries);
-      const detectedFamily = extractFamilyFromText(`${displayLabel} ${searchSource}`) || searchMemory?.family;
-
-      setSearchMemory({
-        family: detectedFamily,
-        normalizedQuery: displayLabel,
-      });
-
-      if (candidates.length === 0) {
-        const unavailableMessage = CONTACT_BLOCK;
-        appendMessage({
-          id: makeId(),
-          role: "assistant",
-          content: unavailableMessage,
-        });
-        rollingHistory.push({ role: "assistant", content: unavailableMessage });
-        continue;
-      }
-
-      if (intent.askForClarification && intent.clarificationQuestion) {
-        const clarificationMessage = intent.clarificationQuestion;
-        appendMessage({
-          id: makeId(),
-          role: "assistant",
-          content: clarificationMessage,
-        });
-        rollingHistory.push({ role: "assistant", content: clarificationMessage });
-        continue;
-      }
-
-      const inStockCandidates = candidates.filter((candidate) => candidate.stock > 0);
-      if (inStockCandidates.length === 0) {
-        appendMessage({
-          id: makeId(),
-          role: "assistant",
-          content: CONTACT_BLOCK,
-        });
-        rollingHistory.push({ role: "assistant", content: CONTACT_BLOCK });
-        continue;
-      }
-
-      const focusedCandidates = sortCandidatesForDisplay(inStockCandidates, displayLabel);
-      const choiceGroups = buildChoiceGroups(focusedCandidates, task.requestedLabel);
-      if (choiceGroups.length > 0) {
-        const choiceMessageId = makeId();
-        const choiceMessage = formatVariantQuestion(displayLabel, choiceGroups);
-        appendMessage({
-          id: choiceMessageId,
-          role: "assistant",
-          content: choiceMessage,
-          choiceGroups,
-        });
-        rollingHistory.push({ role: "assistant", content: choiceMessage });
-        setActiveVariantSelection({
-          messageId: choiceMessageId,
-          task,
-          candidates: focusedCandidates,
-          choiceGroups,
-          selectedChoices: {},
-          remainingTasks: tasks.slice(taskIndex + 1),
-        });
-        return;
-      }
-
-      candidates = sortCandidatesForDisplay(filterCandidatesByChoices(focusedCandidates, {}), displayLabel);
-      const response = formatAvailablePartsResponse(displayLabel, candidates);
-      appendMessage({
-        id: makeId(),
-        role: "assistant",
-        content: response,
-      });
-      rollingHistory.push({ role: "assistant", content: response });
-    }
-
-    setActiveVariantSelection(null);
-  };
-
   const handleChoiceSelect = (groupKey: string, option: string) => {
     setActiveVariantSelection((current) => {
       if (!current) return current;
-      const nextSelectedChoices = {
+      const selectedChoices = {
         ...current.selectedChoices,
         [groupKey]: option,
       };
-      setInput(Object.values(nextSelectedChoices).join(" "));
+      setInput(Object.values(selectedChoices).join(" "));
       return {
         ...current,
-        selectedChoices: nextSelectedChoices,
+        selectedChoices,
       };
     });
   };
@@ -656,13 +295,13 @@ const Index = () => {
   const handleSend = async () => {
     if (isLoading || vehicles.length === 0) return;
 
-    const userMessage = input.trim();
-    if (!userMessage && !activeVariantSelection) return;
+    const typedMessage = input.trim();
+    const selectedVariantReply = Object.values(activeVariantSelection?.selectedChoices || {}).join(" ").trim();
+    const outgoingMessage = typedMessage || selectedVariantReply;
 
-    const activeVehicle = vehicles[0];
-    const outgoingMessage = userMessage || Object.values(activeVariantSelection?.selectedChoices || {}).join(" ").trim();
     if (!outgoingMessage) return;
 
+    const activeVehicle = vehicles[0];
     const userMessageEntry: Message = {
       id: makeId(),
       role: "user",
@@ -681,67 +320,62 @@ const Index = () => {
         .concat({ role: "user", content: outgoingMessage });
 
       if (activeVariantSelection) {
-        const explicitChoices = {
+        const currentParts = getCatalogPartsByReferences(activeVariantSelection.candidateReferences).filter((part) => part.stock > 0);
+        const nextChoices = {
           ...activeVariantSelection.selectedChoices,
-          ...extractChoicesFromText(outgoingMessage),
+          ...extractChoicesFromText(outgoingMessage, activeVariantSelection.choiceGroups),
         };
-        const filteredCandidates = filterCandidatesByChoices(activeVariantSelection.candidates, explicitChoices);
+        const filteredParts = filterPartsByChoices(currentParts, nextChoices);
 
-        if (filteredCandidates.length > 0) {
-          const orderedFilteredCandidates = sortCandidatesForDisplay(filteredCandidates, activeVariantSelection.task.requestedLabel);
-          const remainingChoiceGroups = buildChoiceGroups(
-            orderedFilteredCandidates,
-            `${activeVariantSelection.task.searchPrompt || activeVariantSelection.task.requestedLabel} ${outgoingMessage}`.trim(),
-          );
-
-          if (remainingChoiceGroups.length > 0) {
-            const choiceMessageId = makeId();
-            const choiceMessage = formatVariantQuestion(activeVariantSelection.task.requestedLabel, remainingChoiceGroups);
-            appendMessage({
-              id: choiceMessageId,
-              role: "assistant",
-              content: choiceMessage,
-              choiceGroups: remainingChoiceGroups,
-            });
-            setActiveVariantSelection({
-              messageId: choiceMessageId,
-              task: activeVariantSelection.task,
-              candidates: orderedFilteredCandidates,
-              choiceGroups: remainingChoiceGroups,
-              selectedChoices: explicitChoices,
-              remainingTasks: activeVariantSelection.remainingTasks,
-            });
-            return;
-          }
-
-          const response = formatAvailablePartsResponse(activeVariantSelection.task.requestedLabel, orderedFilteredCandidates);
+        if (filteredParts.length === 0) {
+          const retryMessage = buildClarificationMessage(activeVariantSelection.label, activeVariantSelection.choiceGroups);
+          const retryMessageId = makeId();
           appendMessage({
-            id: makeId(),
+            id: retryMessageId,
             role: "assistant",
-            content: response,
+            content: retryMessage,
+            choiceGroups: activeVariantSelection.choiceGroups,
           });
-
-          const remainingTasks = activeVariantSelection.remainingTasks;
-          setActiveVariantSelection(null);
-          if (remainingTasks.length > 0) {
-            await runSearchFlow(remainingTasks, textHistory.concat({ role: "assistant", content: response }), activeVehicle);
-          }
+          setActiveVariantSelection({
+            ...activeVariantSelection,
+            messageId: retryMessageId,
+          });
           return;
         }
 
-        const mergedTask: SearchTask = {
-          ...activeVariantSelection.task,
-          requestedLabel: `${activeVariantSelection.task.requestedLabel} ${outgoingMessage}`.trim(),
-          searchPrompt: `${activeVariantSelection.task.searchPrompt || activeVariantSelection.task.requestedLabel} ${outgoingMessage}`.trim(),
-        };
-        const remainingTasks = activeVariantSelection.remainingTasks;
+        const { choiceGroups, filteredParts: narrowedParts } = buildSequentialChoiceGroups(filteredParts, nextChoices);
+
+        if (choiceGroups.length > 0) {
+          const clarificationMessage = buildClarificationMessage(activeVariantSelection.label, choiceGroups);
+          const clarificationMessageId = makeId();
+          appendMessage({
+            id: clarificationMessageId,
+            role: "assistant",
+            content: clarificationMessage,
+            choiceGroups,
+          });
+          setActiveVariantSelection({
+            messageId: clarificationMessageId,
+            label: activeVariantSelection.label,
+            candidateReferences: narrowedParts.map((part) => part.reference),
+            choiceGroups,
+            selectedChoices: nextChoices,
+          });
+          return;
+        }
+
+        appendMessage({
+          id: makeId(),
+          role: "assistant",
+          content: formatAvailablePartsResponse(activeVariantSelection.label, narrowedParts.map((part) => part.reference)),
+        });
         setActiveVariantSelection(null);
-        await runSearchFlow([mergedTask, ...remainingTasks], textHistory, activeVehicle);
         return;
       }
 
-      const onlySmallTalk = /^(merci|merci beaucoup|thank you|thx|shukran|barakallah|yaatik essaha|bravo|sa7a)$/i.test(outgoingMessage);
-      if (onlySmallTalk || isSmallTalkMessage(outgoingMessage)) {
+      setActiveVariantSelection(null);
+
+      if (COURTESY_PATTERN.test(outgoingMessage)) {
         appendMessage({
           id: makeId(),
           role: "assistant",
@@ -750,30 +384,121 @@ const Index = () => {
         return;
       }
 
-      const batchPlan = await analyzePartsBatchRequest(outgoingMessage, textHistory, activeVehicle);
-      const tasks = batchPlan.items.map((item) => enrichTaskWithMemory(item, searchMemory));
+      const plan = await searchPartsConversationWithOpenAI(outgoingMessage, textHistory, activeVehicle);
 
-      if (tasks.length > 1) {
-        const introMessage = batchPlan.intro?.trim() || formatQueueIntro();
+      if (plan.conversationalReply && plan.searches.length === 0) {
         appendMessage({
           id: makeId(),
           role: "assistant",
-          content: introMessage,
+          content: sanitizeAssistantNarrative(plan.conversationalReply),
         });
-        textHistory.push({ role: "assistant", content: introMessage });
+        return;
       }
 
-      await runSearchFlow(tasks, textHistory, activeVehicle);
-    } catch (error: any) {
+      if (plan.searches.length === 0) {
+        appendMessage({
+          id: makeId(),
+          role: "assistant",
+          content: "Je n'ai pas identifie de piece precise dans votre message. Je peux vous aider si vous m'indiquez la piece souhaitee.",
+        });
+        return;
+      }
+
+      if (plan.searches.length > 1 && plan.intro?.trim()) {
+        appendMessage({
+          id: makeId(),
+          role: "assistant",
+          content: sanitizeAssistantNarrative(plan.intro),
+        });
+      }
+
+      for (const search of plan.searches) {
+        const label = search.normalizedLabel || search.requestedLabel || "cette piece";
+
+        if (search.kind === "clarification") {
+          const candidateParts = getCatalogPartsByReferences(search.candidateReferences);
+          const { choiceGroups, filteredParts } = buildSequentialChoiceGroups(candidateParts);
+          const clarificationMessage =
+            sanitizeAssistantNarrative(search.reply) ||
+            buildClarificationMessage(label, choiceGroups);
+
+          const messageId = makeId();
+          appendMessage({
+            id: messageId,
+            role: "assistant",
+            content: clarificationMessage,
+            choiceGroups,
+          });
+
+          if (choiceGroups.length > 0) {
+            setActiveVariantSelection({
+              messageId,
+              label,
+              candidateReferences: filteredParts.map((part) => part.reference),
+              choiceGroups,
+              selectedChoices: {},
+            });
+          }
+          return;
+        }
+
+        if (search.kind === "out_of_stock") {
+          appendMessage({
+            id: makeId(),
+            role: "assistant",
+            content: CONTACT_BLOCK,
+          });
+          continue;
+        }
+
+        if (search.kind === "match") {
+          const matchedParts = getCatalogPartsByReferences(search.selectedReferences).filter((part) => part.stock > 0);
+          const { choiceGroups, filteredParts } = buildSequentialChoiceGroups(matchedParts);
+
+          if (choiceGroups.length > 0) {
+            const messageId = makeId();
+            appendMessage({
+              id: messageId,
+              role: "assistant",
+              content: buildClarificationMessage(label, choiceGroups),
+              choiceGroups,
+            });
+            setActiveVariantSelection({
+              messageId,
+              label,
+              candidateReferences: filteredParts.map((part) => part.reference),
+              choiceGroups,
+              selectedChoices: {},
+            });
+            return;
+          }
+
+          appendMessage({
+            id: makeId(),
+            role: "assistant",
+            content: formatAvailablePartsResponse(label, search.selectedReferences, search.reply),
+          });
+          continue;
+        }
+
+        appendMessage({
+          id: makeId(),
+          role: "assistant",
+          content: sanitizeAssistantNarrative(search.reply) || "Non disponible dans la base.",
+        });
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "";
+
       toast({
         title: "Erreur",
         description:
-          error?.message === "MISSING_GEMINI_API_KEY"
-            ? "Ajoutez VITE_GEMINI_API_KEY ou GEMINI_API_KEY dans le fichier .env."
-            : error?.message === "INVALID_GEMINI_API_KEY"
-              ? "La cle API Gemini configuree n'est pas valide."
-              : error?.message === "GEMINI_PERMISSION_DENIED"
-                ? "L'acces au modele Gemini est refuse pour cette cle API."
+          errorMessage === "MISSING_OPENAI_API_KEY"
+            ? "Ajoutez VITE_OPENAI_API_KEY ou OPENAI_API_KEY dans le fichier .env."
+            : errorMessage === "INVALID_OPENAI_API_KEY"
+              ? "La cle API OpenAI configuree n'est pas valide."
+              : errorMessage === "MISSING_GEMINI_API_KEY"
+                ? "Ajoutez VITE_GEMINI_API_KEY ou GEMINI_API_KEY dans le fichier .env."
                 : "Impossible de traiter votre demande. Reessayez.",
         variant: "destructive",
       });
@@ -852,11 +577,7 @@ const Index = () => {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-                  placeholder={
-                    activeVariantSelection
-                      ? "Choisissez vos variantes puis envoyez..."
-                      : "Exemple : amortisseur, echappement et aile..."
-                  }
+                  placeholder={activeVariantSelection ? "Choisissez vos variantes puis envoyez..." : "Exemple : amortisseur, bougies et aile..."}
                   disabled={isLoading}
                   className="flex-1 shadow-sm focus:shadow-md transition-shadow"
                 />
