@@ -15,7 +15,7 @@ import {
   detectAmbiguousAxes,
   filterPartsByChoices,
   getCatalogPartsByReferences,
-  searchPartsConversationWithOpenAI,
+  searchPartsConversationWithOpenAI as searchPartsConversationWithAI,
   type ClarificationAxis,
 } from "@/services/openaiPartsService";
 import type { Part } from "@/data/volvoPartsDatabase";
@@ -237,13 +237,13 @@ const Index = () => {
         description = `Seules les cartes grises Volvo sont acceptees.\n\nDetecte: ${detectedMarque} ${detectedModele}`;
       } else if (errorMessage === "MISSING_GEMINI_API_KEY") {
         title = "Configuration manquante";
-        description = "Ajoutez VITE_GEMINI_API_KEY dans le fichier .env.";
+        description = "Ajoutez les variables AI requises dans le fichier .env.";
       } else if (errorMessage === "INVALID_GEMINI_API_KEY") {
-        title = "Cle Gemini invalide";
-        description = "La cle API Gemini configuree n'est pas valide.";
+        title = "Cle AI invalide";
+        description = "La cle AI configuree n'est pas valide.";
       } else if (errorMessage === "GEMINI_PERMISSION_DENIED") {
-        title = "Acces Gemini refuse";
-        description = "L'acces au modele Gemini est refuse pour cette cle API.";
+        title = "Acces AI refuse";
+        description = "L'acces au modele AI est refuse pour cette cle.";
       } else if (errorMessage === "UNREADABLE_IMAGE") {
         description = "L'image est illisible. Essayez avec une meilleure qualite ou un meilleur eclairage.";
       } else if (errorMessage === "PARSE_ERROR") {
@@ -384,7 +384,7 @@ const Index = () => {
         return;
       }
 
-      const plan = await searchPartsConversationWithOpenAI(outgoingMessage, textHistory, activeVehicle);
+      const plan = await searchPartsConversationWithAI(outgoingMessage, textHistory, activeVehicle);
 
       if (plan.conversationalReply && plan.searches.length === 0) {
         appendMessage({
@@ -493,13 +493,11 @@ const Index = () => {
       toast({
         title: "Erreur",
         description:
-          errorMessage === "MISSING_OPENAI_API_KEY"
-            ? "Ajoutez VITE_OPENAI_API_KEY ou OPENAI_API_KEY dans le fichier .env."
-            : errorMessage === "INVALID_OPENAI_API_KEY"
-              ? "La cle API OpenAI configuree n'est pas valide."
-              : errorMessage === "MISSING_GEMINI_API_KEY"
-                ? "Ajoutez VITE_GEMINI_API_KEY ou GEMINI_API_KEY dans le fichier .env."
-                : "Impossible de traiter votre demande. Reessayez.",
+          errorMessage === "MISSING_OPENAI_API_KEY" || errorMessage === "MISSING_GEMINI_API_KEY"
+            ? "Ajoutez les variables AI requises dans le fichier .env."
+            : errorMessage === "INVALID_OPENAI_API_KEY" || errorMessage === "INVALID_GEMINI_API_KEY"
+              ? "La cle AI configuree n'est pas valide."
+              : "Impossible de traiter votre demande. Reessayez.",
         variant: "destructive",
       });
     } finally {
